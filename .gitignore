@@ -1,0 +1,32 @@
+# Host-only dependencies and generated test artifacts
+/work/
+/.deps/
+/tests/.deps/
+/tests/build/
+/build/
+/build-host/
+
+# CubeIDE/compiler output (keep .ioc and project configuration tracked)
+/Debug/
+/Release/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+
+# Local editor/OS files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Python validation cache
+__pycache__/
+*.pyc
+
+# Host circuit simulation results
+/simulation/libbuck_sim.so
+/simulation/out/
+/simulation/out_*/
