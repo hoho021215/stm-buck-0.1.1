@@ -15,10 +15,10 @@ static inline void Buck_IrqRestore(uint32_t mask) { Buck_Test_IrqRestore(mask); 
 #else
 static inline uint32_t Buck_IrqSave(void)
 {
-    uint32_t mask=__get_PRIMASK();
+    uint32_t mask=__get_PRIMASK();  /* 예외 처리 중 호출될 수도 있으므로 기존 인터럽트 마스크를 보관합니다. */
     __disable_irq();
     return mask;
 }
-static inline void Buck_IrqRestore(uint32_t mask) { __set_PRIMASK(mask); }
+static inline void Buck_IrqRestore(uint32_t mask) { __set_PRIMASK(mask); }  /* 호출 전 마스크를 복원하므로 이미 차단돼 있던 IRQ는 계속 차단됩니다. */
 #endif
 #endif

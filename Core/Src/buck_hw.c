@@ -10,7 +10,7 @@ static bool pin_af(GPIO_TypeDef *port, uint32_t pin, uint32_t af)
 {
     return ((port->AFR[pin / 8u] >> (4u * (pin % 8u))) & 15u) == af;
 }
-
+/* ADC·DMA·GPIO의 클럭 공급과 TIM1의 실제 설정 주파수를 기동 전에 확인합니다. */
 static bool clocks_valid(void)
 {
     uint32_t timer_hz;
@@ -36,7 +36,7 @@ static bool clocks_valid(void)
            (RCC->CFGR2 & RCC_CFGR2_ADCPRE12) == RCC_ADC12PLLCLK_DIV1 &&
            (ADC12_COMMON->CCR & (ADC12_CCR_CKMODE | ADC12_CCR_MULTI)) == 0u;
 }
-
+/* PA0~PA2의 아날로그 모드, PWM 출력의 대체 기능, 전용 EN(PC6)의 초기 LOW를 확인합니다. */
 static bool pins_valid(void)
 {
     uint32_t adc_pulls = (3u << 0u) | (3u << 2u) | (3u << 4u);
@@ -51,12 +51,12 @@ static bool pins_valid(void)
            pin_mode(GPIOC, 6u, 1u) && !(GPIOC->OTYPER & GPIO_PIN_6) &&
            !(GPIOC->ODR & GPIO_PIN_6);
 }
-
+/* TIM1 트리거 한 번에 인덕터 전류 → 출력전압 → 입력전압 순서로 12비트 변환하는 설정을 확인합니다. */
 static bool adc_valid(const ADC_HandleTypeDef *adc)
 {
     const uint32_t sequence_mask = ADC_SQR1_L | ADC_SQR1_SQ1 |
                                    ADC_SQR1_SQ2 | ADC_SQR1_SQ3;
-    const uint32_t sequence = 2u | (1u << ADC_SQR1_SQ1_Pos) |
+    const uint32_t sequence = 2u | (1u << ADC_SQR1_SQ1_Pos) |  /* L 필드의 2는 세 번 변환한다는 뜻입니다. */
                               (2u << ADC_SQR1_SQ2_Pos) |
                               (3u << ADC_SQR1_SQ3_Pos);
     const uint32_t sample_mask = ADC_SMPR1_SMP1 | ADC_SMPR1_SMP2 |
@@ -94,7 +94,7 @@ static bool adc_valid(const ADC_HandleTypeDef *adc)
            !(ADC1->OFR3 & ADC_OFR3_OFFSET3_EN) &&
            !(ADC1->OFR4 & ADC_OFR4_OFFSET4_EN);
 }
-
+/* DMA1 채널 1은 ADC 값을 16비트씩 메모리에 순서대로 쓰고 버퍼 끝에서 처음으로 돌아갑니다. */
 static bool dma_valid(const DMA_HandleTypeDef *dma)
 {
     const uint32_t mask = DMA_CCR_DIR | DMA_CCR_CIRC | DMA_CCR_PINC |
@@ -111,7 +111,7 @@ static bool dma_valid(const DMA_HandleTypeDef *dma)
            dma->Init.MemDataAlignment == DMA_MDATAALIGN_HALFWORD &&
            (DMA1_Channel1->CCR & mask) == expected;
 }
-
+/* CH1은 게이트 PWM, CH4는 ADC 트리거입니다. 두 채널의 모드와 비교값 갱신 방식, 데드타임을 확인합니다. */
 static bool timer_valid(void)
 {
     const uint32_t cr1_mask = TIM_CR1_CKD | TIM_CR1_CMS | TIM_CR1_DIR |
@@ -133,7 +133,7 @@ static bool timer_valid(void)
                           TIM_BDTR_AOE | TIM_BDTR_MOE)) ==
                (BUCK_DEADTIME_TICKS | TIM_BDTR_OSSI | TIM_BDTR_OSSR);
 }
-
+/* CubeMX가 구성한 핸들과 레지스터를 읽어 한 항목이라도 다르면 false를 반환합니다. */
 bool Buck_HardwareConfigValid(ADC_HandleTypeDef *adc, TIM_HandleTypeDef *tim)
 {
     if (adc == NULL || tim == NULL || adc->Instance != ADC1 ||

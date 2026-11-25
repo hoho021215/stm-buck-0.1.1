@@ -6,10 +6,10 @@
 #include "stm32f3xx_hal.h"
 #include "buck_board.h"
 
-/* MX_*_Init() 완료 뒤, ADC 보정/DMA 시작 전에 호출합니다.
- * 레지스터를 변경하지 않습니다. 실제 배선, 외부 EN 풀다운, 게이트 파형,
- * L/C 및 독립 하드웨어 보호가 정상인지 보증하는 함수는 아닙니다.
- * 현재 프로필: PC0/PA7 PWM, PA0/1/2 ADC, 전용 PC6 EN. */
+/* 주변장치 초기화 후 Buck_Init()이 이 함수를 호출해 ADC·DMA 시작 여부를 결정합니다.
+ * true이면 핸들과 검사 대상 레지스터가 기대값과 일치합니다. false이면 Buck_Init()이 SETUP(512)을 기록합니다.
+ * PC0/PA7의 PWM, PA0~2의 ADC, PC6의 전용 EN 설정을 읽습니다.
+ * 실제 EN 풀다운, 게이트 비중첩, 센서 배선 및 전력단 동작은 보드에서 확인해야 합니다. */
 bool Buck_HardwareConfigValid(ADC_HandleTypeDef *adc, TIM_HandleTypeDef *tim);
 
 #endif

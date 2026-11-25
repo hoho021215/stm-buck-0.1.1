@@ -20,7 +20,7 @@
 #define PERIOD BUCK_PERIOD_TICKS
 #define TRIGGER BUCK_TRIGGER_TICKS
 #define MARGIN BUCK_MARGIN_TICKS
-#define VOLTAGE_LOOP_DIVIDER 5u
+#define VOLTAGE_LOOP_DIVIDER 5u  /* PWM 5주기마다 전압 PI를 한 번 갱신합니다(50 kHz ÷ 5 = 10 kHz). */
 #define VOLTAGE_LOOP_PERIOD_S ((float)VOLTAGE_LOOP_DIVIDER / (float)BUCK_PWM_HZ)
 #define DUTY_CEILING 0.75f
 #define VIN_MIN_V 23.0f
@@ -34,41 +34,41 @@ enum { DISARMED, PRECHARGE, SOFTSTART, RUN, FAULT };
 enum { F_ADC=1, F_ZERO=2, F_TIMING=4, F_VIN=8, F_OVP=16,
        F_OC=32, F_REVERSE=64, F_PREBIAS=128, F_STARTUP=256, F_SETUP=512 };
 /* 디버거 명령: 1=시작, 2=정지, 3=고장 해제(재시작하지 않음) */
-volatile uint32_t buck_arm_request;
-volatile uint32_t buck_feature_request = BUCK_FEATURE_ALL;
+volatile uint32_t buck_arm_request;  /* 디버거에서 한 번 쓰는 명령. ADC 콜백이 읽으면 0으로 되돌립니다. */
+volatile uint32_t buck_feature_request = BUCK_FEATURE_ALL;  /* 다음 기동의 기능 조합. 운전 중 적용값은 buck_debug.active_features에서 읽습니다. */
 /* 자주 조정하는 값: 전원을 다시 켜도 쓸 기본값을 여기서 바꾸고 빌드합니다.
  * 실험 중에는 같은 이름의 RAM 변수를 DISARMED에서 바꾼 뒤 기동을 요청합니다. */
 volatile BuckTuning buck_tuning_request = {
-    .kp = 0.005f,
-    .ki = 0.25f,
-    .nominal_vin_v = 30.0f,
-    .integral_limit = 0.25f,
-    .aw_gain_per_s = 50.0f,
-    .run_slew_per_s = 1.0f
+    .kp = 0.005f,  /* duty/V. 출력이 목표보다 1 V 낮으면 비례항이 요청 듀티에 0.005를 더합니다. */
+    .ki = 0.25f,  /* duty/(V·s). 적분 시 코드에서 PI 주기 100 µs를 곱합니다. */
+    .nominal_vin_v = 30.0f,  /* V. 입력전압 피드포워드를 끈 실험에서 기본 듀티를 계산할 분모입니다. */
+    .integral_limit = 0.25f,  /* duty. 기본값이면 누적 적분항을 −0.25에서 +0.25 사이로 제한합니다. */
+    .aw_gain_per_s = 50.0f,  /* 1/s. 실제 적용한 듀티와 요청 듀티 간 차이를 적분기에 되먹이는 계수입니다. */
+    .run_slew_per_s = 1.0f  /* duty/s. 기동 확인 후 상승률 제한 기능이 켜졌을 때 사용합니다. */
 };
-volatile BuckDebug buck_debug;
-volatile BuckFaultSnapshot buck_fault_snapshot;
+volatile BuckDebug buck_debug;  /* Live Expressions에서 운전 상태·최근 측정값·수락된 설정을 읽습니다. */
+volatile BuckFaultSnapshot buck_fault_snapshot;  /* 최초 차단 원인과 당시 표본을 RAM에 보관합니다. */
 /* CubeMX: DMA Circular/Halfword, ADC Rank 순서 IL,Vout,Vin.
  * 3개씩 두 프레임을 받아 Half/Full 완료 콜백으로 처리합니다.
  * DMA가 접근하지 못하는 CCM RAM에 이 버퍼를 배치하면 안 됩니다. */
 static volatile uint16_t adc_frame[6];
 static struct {
-    uint32_t state, faults, count, phase, boot, checked;
+    uint32_t state, faults, count, phase, boot, checked;  /* count는 기동 경과 주기, phase는 PI 분주, boot는 충전 잔여 주기, checked는 기동 확인 결과입니다. */
     uint32_t active_features;
     uint32_t zero_sum, zero_n, calibrated, previous, previous_valid, expect;
     uint32_t sampling_started, watchdog_seen, watchdog_fresh_ms, precharge_enabled;
     uint32_t sample_valid, raw_adc[3];
     float sample_vin, sample_vout, sample_il;
     BuckSupervisor supervisor;
-    BuckTuning tuning;
-    float run_slew_step;
+    BuckTuning tuning;  /* 현재 운전에 쓰는 설정. 다음 기동 수락 때 요청값에서 복사합니다. */
+    float run_slew_step;  /* 정상 운전 중 한 PWM 주기에 허용할 듀티 증가량입니다. */
     uint16_t zero_min, zero_max;
-    float zero, ref, integ, prop, aw, cap, duty;
+    float zero, ref, integ, prop, aw, cap, duty;  /* zero와 ref는 V, integ·prop·aw는 듀티 보정량, cap과 duty는 상한·적용 명령입니다. */
 } b;
 
 static float clamp(float x, float lo, float hi)
 { return x < lo ? lo : (x > hi ? hi : x); }
-
+/* 정지 버튼과 오류 처리기에서도 호출합니다. 드라이버 EN을 LOW로 내리고 TIM1 출력을 차단합니다. */
 void Buck_EmergencyOff(void)
 {
     /* Error_Handler는 주변장치 초기화 전에도 호출될 수 있습니다.
@@ -84,8 +84,8 @@ void Buck_EmergencyOff(void)
     /* CCR1=0만으로 정지하면 상보 저측 MOSFET은 계속 켜질 수 있습니다. */
 }
 
-/* 최초 고장만 기록합니다. 이후 ADC/타이밍 오류가 추가돼도 덮어쓰지 않습니다.
- * valid는 마지막에 설정합니다. 디버거에서 sample_valid도 함께 확인합니다. */
+/* 먼저 게이트를 차단하고, 이번 고장의 비트와 최초 차단 직전 상태를 RAM에 기록합니다.
+ * first_fault는 첫 기록을 유지하고 faults에는 후속 원인도 누적됩니다. valid와 sample_valid를 함께 확인하세요. */
 static void trip(uint32_t fault)
 {
     Buck_EmergencyOff();
@@ -111,7 +111,7 @@ static void trip(uint32_t fault)
     buck_debug.state=FAULT; buck_debug.faults=b.faults;
     buck_debug.duty=0.0f; buck_debug.pgood=0u; buck_debug.monitoring=0u;
 }
-
+/* 기동·정지·고장 해제 시 이전 운전의 램프, PI 누적값, 듀티와 출력 감시 카운터를 초기화합니다. */
 static void reset_control(void)
 {
     b.count=0u; b.phase=0u; b.boot=0u; b.checked=0u;
@@ -135,7 +135,7 @@ static bool tuning_valid(const BuckTuning *t)
 
 static void request_start(float vin, float vout)
 {
-    /* 요청 변수는 한 번만 읽습니다. 검증한 복사본만 제어 경로에서 사용합니다. */
+    /* 보정 완료·정지 상태에서 호출합니다. 요청값을 복사해 검사하고, 수락하면 부트스트랩 충전으로 넘어갑니다. */
     const BuckTuning candidate = buck_tuning_request;
     const uint32_t features = buck_feature_request;
     if (!BUCK_BOARD_VERIFIED) return;
@@ -154,15 +154,15 @@ static void request_start(float vin, float vout)
     buck_debug.uv_warning_latched = 0u;
     b.state=PRECHARGE; b.boot=52u;
 }
-
+/* 콜백 진입 때의 TIM1 카운터와 그 후 소비한 CPU 사이클로 다음 PWM 갱신 전 마감 여유를 확인합니다. */
 static bool deadline_ok(uint32_t entered, uint32_t counter)
 {
     return counter>=TRIGGER && counter<PERIOD-MARGIN &&
            DWT->CYCCNT-entered < PERIOD-counter-MARGIN;
 }
 
-/* ADC DMA 인터럽트에서 20us마다 실행합니다. printf/HAL_Delay는 금지합니다.
- * 원시 전류는 표본별 소프트웨어 차단에 사용하고, PGOOD/UV는 별도 저속 조건을 확인합니다. */
+/* ADC DMA 절반/전체 완료 때마다 20 µs 간격으로 호출됩니다. 인터럽트 안에서는 printf나 HAL_Delay를 피하세요.
+ * half가 가리키는 세 표본을 환산하고 기동 조건·보호를 확인한 뒤 듀티 갱신과 성능 측정을 수행합니다. */
 static void frame(uint32_t half)
 {
     uint32_t entered=DWT->CYCCNT, counter=TIM1->CNT, offset=half*3u;
@@ -171,13 +171,13 @@ static void frame(uint32_t half)
     float vi=(float)ri*(VDDA/4095.0f);
     float vin=(float)rin*(VDDA*19.0f/4095.0f);
     float vout=(float)rv*(VDDA*19.0f/4095.0f);
-    float il=CURRENT_POLARITY*(vi-b.zero)/0.132f;
+    float il=CURRENT_POLARITY*(vi-b.zero)/0.132f;  /* ACS71240 출력에서 실측 영점(V)을 빼고 감도 0.132 V/A로 나눠 A로 환산합니다. */
     if (request != 0u) buck_arm_request=0u; /* 읽은 명령만 소비합니다. */
     ++buck_debug.frames;
     b.sample_valid=1u;
     b.raw_adc[0]=ri; b.raw_adc[1]=rv; b.raw_adc[2]=rin;
     b.sample_vin=vin; b.sample_vout=vout; b.sample_il=il;
-
+    /* DMA의 앞·뒤 절반 순서와 도착 간격을 검사해 ADC 프레임 누락과 연산 지연을 감지합니다. */
     if (b.previous_valid) {
         uint32_t interval=entered-b.previous;
         if (interval<PERIOD-BUCK_FRAME_JITTER_TICKS ||
@@ -202,7 +202,7 @@ static void frame(uint32_t half)
         memset((void *)&buck_fault_snapshot,0,sizeof buck_fault_snapshot);
     }
 
-    /* 양쪽 게이트 OFF, 외부 전류도 0인 조건에서 2048표본으로 영점을 보정합니다. */
+    /* 정지·무전류에서 2,048표본(약 41 ms)의 평균을 전류 센서 영점 전압으로 저장합니다. */
     if (!b.calibrated && b.state==DISARMED) {
         Buck_EmergencyOff(); b.zero_sum+=ri;
         if (ri<b.zero_min) b.zero_min=ri;
@@ -253,24 +253,24 @@ static void frame(uint32_t half)
         if (!(TIM1->BDTR&TIM_BDTR_MOE)) trip(F_SETUP);
         if (b.state!=FAULT) {
             if (b.count<50000u) ++b.count;
-            b.ref=b.count<15000u ? 15.0f*((float)b.count/15000.0f) : 15.0f;
+            b.ref=b.count<15000u ? 15.0f*((float)b.count/15000.0f) : 15.0f;  /* 15,000주기(300 ms)에 걸쳐 목표를 15 V로 올립니다. */
             if (b.count>=15000u) b.state=RUN;
-            if (!b.checked && b.count>=50000u) {
+            if (!b.checked && b.count>=50000u) {  /* 소프트스타트 시작 약 1초 뒤 출력이 13.5 V에 도달했는지 한 번 확인합니다. */
                 if (vout<13.5f) trip(F_STARTUP);
                 else b.checked=1u;
             }
-            /* 전류에 따른 듀티 상한은 모든 조합에서 적용합니다. */
+            /* 전류 표본이 1.15 A를 넘으면 듀티 상한을 낮추고 1.05 A 아래면 서서히 복원합니다. */
             if (il>1.15f) b.cap-=20.0f/50000.0f;
             else if (il<1.05f) b.cap+=0.5f/50000.0f;
             b.cap=clamp(b.cap,0.0f,DUTY_CEILING);
-            if (b.phase==0u) {
+            if (b.phase==0u) {  /* 이 블록에서 P·I를 갱신하고 다음 갱신까지 그 값을 사용합니다. */
                 float error=b.ref-vout;
                 b.integ=clamp(b.integ + b.aw + b.tuning.ki * error * VOLTAGE_LOOP_PERIOD_S,
                               -b.tuning.integral_limit, b.tuning.integral_limit);
                 b.aw=0.0f; b.prop=b.tuning.kp * error;
             }
             if (++b.phase==VOLTAGE_LOOP_DIVIDER) b.phase=0u;
-            /* 피드포워드 OFF는 이번 기동에 수락된 공칭 Vin을 사용합니다. */
+            /* 기본 듀티는 목표전압/입력전압입니다. 기능을 켜면 측정 Vin, 끄면 수락된 공칭 Vin을 씁니다. */
             float feedforward_vin = (b.active_features & BUCK_FEATURE_VIN_FF) ? vin : b.tuning.nominal_vin_v;
             float requested=b.ref/feedforward_vin+b.prop+b.integ;
             float applied=clamp(requested,0.0f,b.cap);
@@ -279,7 +279,7 @@ static void frame(uint32_t half)
                 float step = b.checked ? b.run_slew_step : STARTUP_SLEW_PER_S / (float)BUCK_PWM_HZ;
                 applied=clamp(applied,0.0f,b.duty+step);
             }
-            /* ON이면 이번 듀티 제한량을 다음 적분 갱신에 반영합니다. OFF여도 적분기 상하한은 적용됩니다. */
+            /* 매 PWM 주기의 듀티 차이(applied − requested)를 aw에 모아 다음 PI 갱신에서 적분항을 보정합니다. */
             if (b.active_features & BUCK_FEATURE_TRACKING_AW) {
                 b.aw+=b.tuning.aw_gain_per_s * (applied-requested) / (float)BUCK_PWM_HZ;
             }
@@ -288,7 +288,7 @@ static void frame(uint32_t half)
                 if (!deadline_ok(entered,counter)) trip(F_TIMING);
                 else {
                     b.duty=applied;
-                    TIM1->CCR1=(uint32_t)(applied*(float)PERIOD+0.5f);
+                    TIM1->CCR1=(uint32_t)(applied*(float)PERIOD+0.5f);  /* 0~1 듀티를 타이머 카운트로 반올림해 다음 PWM 갱신에 반영합니다. */
                 }
             }
         }
@@ -312,10 +312,10 @@ static void frame(uint32_t half)
     if (!deadline_ok(entered,counter)) trip(F_TIMING);
 }
 
-/* [직접 작성하는 HAL 콜백] HAL의 weak 기본 함수를 재정의합니다.
- * main.c의 USER CODE 4 또는 다른 .c에 같은 함수를 중복 정의하지 마세요.
- * stm32f3xx_it.c의 자동 생성 HAL_DMA_IRQHandler/HAL_ADC_IRQHandler는
- * 그대로 둡니다. 해당 HAL 처리 후 아래 콜백이 호출됩니다. */
+/* DMA에 세 표본이 차면 HAL이 앞쪽(half)과 뒤쪽(full) 완료 콜백을 번갈아 호출합니다.
+ * 두 콜백 모두 frame()으로 들어가고, ADC1 오류 콜백은 F_ADC로 차단합니다.
+ * HAL의 weak 기본 콜백을 이 파일에서 재정의하므로 main.c에 중복 정의하지 마세요.
+ * CubeMX가 생성한 stm32f3xx_it.c의 HAL_DMA_IRQHandler/HAL_ADC_IRQHandler가 이벤트를 전달합니다. */
 void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *adc)
 { if (adc->Instance==ADC1) frame(0u); }
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *adc)
@@ -325,7 +325,7 @@ void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *adc)
 
 void Buck_Init(void)
 {
-    /* main.c의 USER CODE 2에서 모든 MX_*_Init() 뒤 한 번만 호출합니다. */
+    /* main.c의 USER CODE 2에서 주변장치 초기화 후 한 번 호출합니다. 게이트를 끈 채 ADC/DMA 샘플링을 준비합니다. */
     Buck_EmergencyOff(); memset(&b,0,sizeof b); reset_control();
     BuckMeasurement_Init();
     b.active_features = BUCK_FEATURE_ALL;
@@ -361,7 +361,7 @@ void Buck_Init(void)
     b.sampling_started=1u;
     TIM1->CR1|=TIM_CR1_CEN;
 }
-
+/* main.c의 while 안에서 반복 호출합니다. ADC 프레임이 멎어 콜백이 실행되지 않을 때도 시간 초과를 감지합니다. */
 void Buck_Poll(void)
 {
     if (!b.sampling_started) return;

@@ -17,12 +17,12 @@
 
 /* TIM1 Up / PSC0 / ARR1439에서 50 kHz 기준으로 동작합니다. */
 #define BUCK_PWM_HZ               50000u
-#define BUCK_PERIOD_TICKS         (BUCK_TIMER_CLOCK_HZ / BUCK_PWM_HZ)
-#define BUCK_TRIGGER_TICKS        (BUCK_TIMER_CLOCK_HZ / 200000u)  /* 5us */
-#define BUCK_MARGIN_TICKS         (BUCK_TIMER_CLOCK_HZ / 1000000u) /* 1us */
+#define BUCK_PERIOD_TICKS         (BUCK_TIMER_CLOCK_HZ / BUCK_PWM_HZ) /* PWM 한 주기는 1440카운트(20 µs), ARR에는 1439를 씁니다. */
+#define BUCK_TRIGGER_TICKS        (BUCK_TIMER_CLOCK_HZ / 200000u)  /* PWM 주기 시작 5 µs 뒤에 CH4가 ADC 스캔을 트리거합니다. */
+#define BUCK_MARGIN_TICKS         (BUCK_TIMER_CLOCK_HZ / 1000000u) /* 다음 PWM 갱신 전에 남겨둘 연산 여유 1 µs */
 #define BUCK_DEADTIME_TICKS       22u /* CKD DIV1일 때 약 305.6ns. 튜닝 전 초깃값 */
-#define BUCK_FRAME_JITTER_TICKS   (BUCK_CORE_CLOCK_HZ / 400000u) /* ±2.5us, 실제 WCET 확인 필요 */
-#define BUCK_ADC_STALE_MS         1u /* HAL tick 단위. >1이면 차단(양자화 포함) */
+#define BUCK_FRAME_JITTER_TICKS   (BUCK_CORE_CLOCK_HZ / 400000u) /* 연속 DMA 콜백 도착 간격의 허용 편차 ±2.5 µs */
+#define BUCK_ADC_STALE_MS         1u /* Buck_Poll에서 프레임 증가 없이 HAL tick 차이가 1 ms를 초과하면 차단합니다. */
 
 /* PWM 핀: PC0 / AF2 = TIM1_CH1, PA7 / AF6 = TIM1_CH1N.
  * PWM 핀/AF는 CubeMX에서 생성하며 이 헤더가 GPIO를 설정하지는 않습니다.
