@@ -65,7 +65,7 @@ void BuckMeasurement_Step(bool eligible, uint32_t active_features,
         BuckMeasurement_Abort();
         return;
     }
-    /* 전압 오차는 15 V 기준으로 누적하고 전류는 방향을 포함한 표본의 절댓값으로 비교합니다. */
+    /* 기동 확인 후 목표가 15 V인 운전 구간을 비교합니다. 출력이 높거나 낮은 편차가 서로 상쇄되지 않도록 절댓값을 더합니다. */
     sum_abs_error_v += fabsf(vout - 15.0f);
     if (vout < buck_measurement.vout_min_v) buck_measurement.vout_min_v = vout;
     if (vout > buck_measurement.vout_max_v) buck_measurement.vout_max_v = vout;

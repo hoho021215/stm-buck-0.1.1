@@ -63,7 +63,7 @@ static struct {
     BuckTuning tuning;  /* 현재 운전에 쓰는 설정. 다음 기동 수락 때 요청값에서 복사합니다. */
     float run_slew_step;  /* 정상 운전 중 한 PWM 주기에 허용할 듀티 증가량입니다. */
     uint16_t zero_min, zero_max;
-    float zero, ref, integ, prop, aw, cap, duty;  /* zero와 ref는 V, integ·prop·aw는 듀티 보정량, cap과 duty는 상한·적용 명령입니다. */
+    float zero, Vref, integ, prop, anti, cap, duty;  /* zero·Vref는 센서 영점·현재 목표전압(V), integ·prop·anti는 적분·비례·추적 보정량(duty), cap·duty는 듀티 상한·적용 명령입니다. */
 } b;
 
 static float clamp(float x, float lo, float hi)
@@ -100,7 +100,7 @@ static void trip(uint32_t fault)
         buck_fault_snapshot.vin=b.sample_vin;
         buck_fault_snapshot.vout=b.sample_vout;
         buck_fault_snapshot.il=b.sample_il;
-        buck_fault_snapshot.reference=b.ref;
+        buck_fault_snapshot.reference=b.Vref;
         buck_fault_snapshot.duty=b.duty;
         buck_fault_snapshot.integral=b.integ;
         buck_fault_snapshot.duty_cap=b.cap;
@@ -116,7 +116,7 @@ static void reset_control(void)
 {
     b.count=0u; b.phase=0u; b.boot=0u; b.checked=0u;
     b.precharge_enabled=0u;
-    b.ref=0.0f; b.integ=0.0f; b.prop=0.0f; b.aw=0.0f;
+    b.Vref=0.0f; b.integ=0.0f; b.prop=0.0f; b.anti=0.0f;
     b.cap=DUTY_CEILING; b.duty=0.0f;
     BuckSupervisor_Init(&b.supervisor);
 }
@@ -253,7 +253,7 @@ static void frame(uint32_t half)
         if (!(TIM1->BDTR&TIM_BDTR_MOE)) trip(F_SETUP);
         if (b.state!=FAULT) {
             if (b.count<50000u) ++b.count;
-            b.ref=b.count<15000u ? 15.0f*((float)b.count/15000.0f) : 15.0f;  /* 15,000주기(300 ms)에 걸쳐 목표를 15 V로 올립니다. */
+            b.Vref=b.count<15000u ? 15.0f*((float)b.count/15000.0f) : 15.0f;  /* 15,000주기(300 ms)에 걸쳐 목표를 15 V로 올립니다. */
             if (b.count>=15000u) b.state=RUN;
             if (!b.checked && b.count>=50000u) {  /* 소프트스타트 시작 약 1초 뒤 출력이 13.5 V에 도달했는지 한 번 확인합니다. */
                 if (vout<13.5f) trip(F_STARTUP);
@@ -264,24 +264,24 @@ static void frame(uint32_t half)
             else if (il<1.05f) b.cap+=0.5f/50000.0f;
             b.cap=clamp(b.cap,0.0f,DUTY_CEILING);
             if (b.phase==0u) {  /* 이 블록에서 P·I를 갱신하고 다음 갱신까지 그 값을 사용합니다. */
-                float error=b.ref-vout;
-                b.integ=clamp(b.integ + b.aw + b.tuning.ki * error * VOLTAGE_LOOP_PERIOD_S,
+                float error=b.Vref-vout;
+                b.integ=clamp(b.integ + b.anti + b.tuning.ki * error * VOLTAGE_LOOP_PERIOD_S,
                               -b.tuning.integral_limit, b.tuning.integral_limit);
-                b.aw=0.0f; b.prop=b.tuning.kp * error;
+                b.anti=0.0f; b.prop=b.tuning.kp * error;
             }
             if (++b.phase==VOLTAGE_LOOP_DIVIDER) b.phase=0u;
             /* 기본 듀티는 목표전압/입력전압입니다. 기능을 켜면 측정 Vin, 끄면 수락된 공칭 Vin을 씁니다. */
             float feedforward_vin = (b.active_features & BUCK_FEATURE_VIN_FF) ? vin : b.tuning.nominal_vin_v;
-            float requested=b.ref/feedforward_vin+b.prop+b.integ;
+            float requested=b.Vref/feedforward_vin+b.prop+b.integ;
             float applied=clamp(requested,0.0f,b.cap);
             /* 기동 확인 전에는 항상 상승률을 제한하고, 확인 후에는 RUN_SLEW 선택을 따릅니다. */
             if (!b.checked || (b.active_features & BUCK_FEATURE_RUN_SLEW)) {
                 float step = b.checked ? b.run_slew_step : STARTUP_SLEW_PER_S / (float)BUCK_PWM_HZ;
                 applied=clamp(applied,0.0f,b.duty+step);
             }
-            /* 매 PWM 주기의 듀티 차이(applied − requested)를 aw에 모아 다음 PI 갱신에서 적분항을 보정합니다. */
+            /* 추적 보정이 켜지면 매 PWM 주기에 적용 듀티와 요청 듀티의 차이에 비례한 보정량을 b.anti에 모읍니다. */
             if (b.active_features & BUCK_FEATURE_TRACKING_AW) {
-                b.aw+=b.tuning.aw_gain_per_s * (applied-requested) / (float)BUCK_PWM_HZ;
+                b.anti+=b.tuning.aw_gain_per_s * (applied-requested) / (float)BUCK_PWM_HZ;
             }
             if (b.state!=FAULT) {
                 /* 늦은 계산 결과를 CCR에 쓰기 전에 차단합니다. */
